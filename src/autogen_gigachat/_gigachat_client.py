@@ -15,12 +15,14 @@ from typing import (
     AsyncGenerator,
     Callable,
     Dict,
+    Generator,
     List,
     Mapping,
     Optional,
     Sequence,
     Set,
     Type,
+    TypeVar,
     Union,
     cast,
 )
@@ -47,7 +49,7 @@ from autogen_core.models import (
     UserMessage,
     validate_model_info,
 )
-from autogen_core.models._types import FinishReasons, FunctionExecutionResultMessage
+from autogen_core.models import FinishReasons, FunctionExecutionResultMessage
 from autogen_core.tools import Tool, ToolSchema
 from gigachat import GigaChat
 from gigachat.models import (
@@ -112,10 +114,10 @@ def system_message_to_gigachat(message: SystemMessage) -> Messages:
 # TODO: Handle attachments
 def user_message_to_gigachat(message: UserMessage) -> Sequence[Messages]:
     if isinstance(message.content, str):
-        return Messages(
+        return [ Messages(
             role=MessagesRole.USER,
             content=message.content,
-        )
+        ) ]
     else:
         raise ValueError(f"Unknown content type")
 
@@ -128,10 +130,10 @@ def assistant_message_to_gigachat(message: AssistantMessage) -> Sequence[Message
                 ) for x in message.content
             ]
     else:
-        return Messages(
+        return [ Messages(
             content=message.content,
             role=MessagesRole.ASSISTANT,
-        )
+        ) ]
 
 def function_result_to_json(content: str) -> str:
     try:
@@ -149,7 +151,7 @@ def to_gigachat_type(message: LLMMessage) -> Sequence[Messages]:
     elif isinstance(message, UserMessage):
         return user_message_to_gigachat(message)
     elif isinstance(message, AssistantMessage):
-        return [assistant_message_to_gigachat(message)]
+        return assistant_message_to_gigachat(message)
     else:
         return tool_message_to_gigachat(message)
 
@@ -168,9 +170,10 @@ def convert_tools(
             Function(
                 name=tool_schema["name"],
                 description=tool_schema.get("description"),
+                # TODO: Need improve
                 parameters=(
                         cast(FunctionParameters, tool_schema["parameters"]) if "parameters" in tool_schema else {}
-                        ),
+                        ), # type: ignore
             )
         )
     # Check if all tools have valid names.
@@ -236,8 +239,10 @@ def _add_usage(usage1: RequestUsage, usage2: RequestUsage) -> RequestUsage:
         prompt_tokens=usage1.prompt_tokens + usage2.prompt_tokens,
         completion_tokens=usage1.completion_tokens + usage2.completion_tokens,
     )
+    
+T = TypeVar('T')
 
-def flatten(obj):
+def flatten(obj: list[list[T]] | list[T] | T) -> Generator[T, None, None]:
     if isinstance(obj, list):
         for item in obj:
             yield from flatten(item)
@@ -257,10 +262,6 @@ class GigachatChatCompletionClient(ChatCompletionClient, Component[GigachatClien
         self._raw_config: Dict[str, Any] = dict(kwargs).copy()
         copied_args = dict(kwargs).copy()
         
-        # TODO: Only for tests
-        copied_args["verify_ssl_certs"]=False
-        copied_args["verbose"]=True
-        
         model_info: Optional[ModelInfo] = None
         if "model_info" in kwargs:
             model_info = kwargs["model_info"]
@@ -270,11 +271,11 @@ class GigachatChatCompletionClient(ChatCompletionClient, Component[GigachatClien
                 copied_args["api_key"] = os.environ["GIGACHAT_API_KEY"]
         
         if "api_key" in copied_args:
-            pass_token_to_gigachat(config_args=copied_args, token=copied_args["api_key"])
+            pass_token_to_gigachat(config_args=copied_args, token=str(copied_args["api_key"]))
         
         if model_info is None:
             try:
-                self._model_info = _model_info.get_info(copied_args["model"])
+                self._model_info = _model_info.get_info(str(copied_args["model"]))
             except KeyError as err:
                 raise ValueError("model_info is required when model name is not a valid Gigachat model") from err
         elif model_info is not None:
@@ -372,7 +373,7 @@ class GigachatChatCompletionClient(ChatCompletionClient, Component[GigachatClien
         
         chatSettings = Chat(
             model=create_args["model"],
-            messages = gigachat_messages,
+            messages = gigachat_messages, # type: ignore
             # TODO: function_call if single tool
             function_call="auto" if tools and len(tools) > 0 else None,
             # TODO: If len(tools) > 6?
@@ -464,19 +465,10 @@ class GigachatChatCompletionClient(ChatCompletionClient, Component[GigachatClien
                 thought = choice.message.content
             content = []
 
-            if not isinstance(choice.message.function_call.arguments, str):
-                warnings.warn(
-                    f"Tool call function arguments field is not a string: {choice.message.function_call.arguments}."
-                    "This is unexpected and may due to the API used not returning the correct type. "
-                    "Attempting to convert it to string.",
-                    stacklevel=2,
-                )
-                if isinstance(choice.message.function_call.arguments, dict):
-                    choice.message.function_call.arguments = json.dumps(choice.message.function_call.arguments)
             content.append(
                 FunctionCall(
                     id=f"call_{uuid.uuid4()}",
-                    arguments=choice.message.function_call.arguments,
+                    arguments=json.dumps(choice.message.function_call.arguments) if isinstance(choice.message.function_call.arguments, dict) else '',
                     name=normalize_name(choice.message.function_call.name),
                 )
             )
@@ -603,12 +595,12 @@ class GigachatChatCompletionClient(ChatCompletionClient, Component[GigachatClien
                     if tool_call_chunk.function_call.name is not None:
                         full_tool_calls[idx].name += tool_call_chunk.function_call.name
                     if tool_call_chunk.function_call.arguments is not None:
-                        full_tool_calls[idx].arguments += tool_call_chunk.function_call.arguments
+                        full_tool_calls[idx].arguments += json.dumps(tool_call_chunk.function_call.arguments)
 
         # Finalize the CreateResult.
 
         # We need to get the model from the last chunk, if available.
-        model = maybe_model or create_params.create_args["model"]
+        model = maybe_model or create_params.model
 
         # Because the usage chunk is not guaranteed to be the last chunk, we need to check if it is available.
         if chunk and chunk.usage:
@@ -674,16 +666,17 @@ class GigachatChatCompletionClient(ChatCompletionClient, Component[GigachatClien
         yield result
 
     async def close(self) -> None:
-        await self._client.close()
+        await self._client.aclose()
     
     def actual_usage(self) -> RequestUsage:
         return self._actual_usage
 
     def total_usage(self) -> RequestUsage:
         return self._total_usage
-
+    
+    # TODO: Need to fix
     def count_tokens(self, messages: Sequence[LLMMessage], *, tools: Sequence[Tool | ToolSchema] = []) -> int:
-        return 
+        return 0
     
     def remaining_tokens(self, messages: Sequence[LLMMessage], *, tools: Sequence[Tool | ToolSchema] = []) -> int:
         token_limit = _model_info.get_token_limit(self._create_args["model"])

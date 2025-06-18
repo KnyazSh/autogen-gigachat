@@ -47,10 +47,10 @@ class GigachatClientConfiguration(CreateArguments, total=False):
     default_headers: Dict[str, str] | None
     
     verify_ssl_certs: Optional[bool]
-    ca_bundle_file: Optional[str] = None
-    cert_file: Optional[str] = None
-    key_file: Optional[str] = None
-    key_file_password: Optional[str] = None
+    ca_bundle_file: Optional[str]
+    cert_file: Optional[str]
+    key_file: Optional[str]
+    key_file_password: Optional[str]
     
     verbose: Optional[bool]
 

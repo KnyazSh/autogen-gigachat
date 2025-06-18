@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "autogen-gigachat"
-version = "0.1.0"
+version = "0.1.1"
 license = {file = "LICENSE"}
 description = "Gigachat client for autogen"
 readme = "README.md"
@@ -15,7 +15,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "autogen-core==0.5.7",
+    "autogen-core==0.6.1",
     "gigachat==0.1.39post1",
 ]
 
